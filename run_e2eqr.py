@@ -6,18 +6,23 @@ import numpy as np
 import collections
 
 import nltk
+nltk.download('punkt_tab')
+nltk.download('wordnet')
+
 from rouge import Rouge
 
 import torch
 import torch.nn as nn
 from transformers import AdamW, get_linear_schedule_with_warmup
-from torch.utils.data import DataLoader, Dataset, default_collate
+from torch.utils.data import DataLoader, Dataset, default_collate, Sampler
 
 from models import BartForConditionalGeneration as ConditionalGeneration
 from transformers import AutoTokenizer
 
 args = None
 nlp = None
+supp_ratios = None
+loss_weights = None
 FeatInst = collections.namedtuple('FeatInst', 'unique_id input_ids attention_mask decoder_input_ids decoder_attention_mask labels hop')
 
 def parse_argument():
@@ -39,20 +44,21 @@ def parse_argument():
     parser.add_argument("--do_analyze", action="store_true")
 
     ### Data ###
-    parser.add_argument("--train_data_file", type=str, default="/home/seonjeongh/data/musique/experiment/musique_ans_supp_train_bridge.json")
-    parser.add_argument("--valid_data_file", type=str, default="/home/seonjeongh/data/musique/experiment/musique_ans_supp_dev_bridge.json")
-    parser.add_argument("--test_data_file", type=str, default="/home/seonjeongh/data/musique/experiment/musique_ans_supp_test_bridge.json")
+    parser.add_argument("--train_data_file", type=str, default="musique_ans_supp_train_bridge.json")
+    parser.add_argument("--valid_data_file", type=str, default="musique_ans_supp_dev_bridge.json")
+    parser.add_argument("--test_data_file", type=str, default="musique_ans_supp_test_bridge.json")
 
     parser.add_argument("--output_dir", type=str, default="output")
     parser.add_argument("--exp_tag", type=str, default="test")
     parser.add_argument("--checkpoint", type=str, default=None)
 
-    parser.add_argument("--model_name", type=str, default="facebook/bart-large")
+    parser.add_argument("--model_name", type=str, default="facebook/bart-base")
     parser.add_argument("--max_encoder_length", type=int, default=512)
     parser.add_argument("--max_decoder_length", type=int, default=128)
-
-    parser.add_argument("--start_epochs", type=str, default="0,0,0,0")
-    parser.add_argument("--end_epochs", type=str, default="100,100,100,100")
+    
+    parser.add_argument("--supp_ratio", type=float, default=0.1)
+    parser.add_argument("--loss_weight_low", type=float, default=0.8)
+    parser.add_argument("--loss_weight_high", type=float, default=0.1)
 
     #### Ablation
     parser.add_argument("--no_self_attention", action="store_true")
@@ -60,8 +66,6 @@ def parse_argument():
     parser.add_argument("--no_arrangement", action="store_true")
 
     args = parser.parse_args()
-    args.start_epochs = dict([(hop+1, int(epoch)) for hop, epoch in enumerate(args.start_epochs.strip().split(","))])
-    args.end_epochs = dict([(hop+1, int(epoch)) for hop, epoch in enumerate(args.end_epochs.strip().split(","))])
 
 def seed_everything(seed):
     random.seed(seed)
@@ -140,7 +144,6 @@ def get_hotpot_features(data_file, tokenizer, mode):
             attention_mask = encoded_input["attention_mask"]
 
             if len(input_ids) > args.max_encoder_length:
-                print(f"Long Input: {len(input_ids)}")
                 input_ids = input_ids[:args.max_encoder_length]
                 attention_mask = attention_mask[:args.max_encoder_length]
 
@@ -160,7 +163,7 @@ def get_hotpot_features(data_file, tokenizer, mode):
 
                 if len(labels) > args.max_decoder_length:
                     passed_output_num +=1
-                    print(f"Long Output ({passed_output_num}): {len(labels)}")
+                    #print(f"Long Output ({passed_output_num}): {len(labels)}")
                     continue
 
                 while len(labels) < args.max_decoder_length:
@@ -239,7 +242,7 @@ def get_hotpot_features(data_file, tokenizer, mode):
                 attention_mask = encoded["attention_mask"]
 
                 if len(input_ids) > args.max_encoder_length:
-                    print(f"Long Input: {len(input_ids)}")
+                    #print(f"Long Input: {len(input_ids)}")
                     input_ids = input_ids[:args.max_encoder_length]
                     attention_mask = attention_mask[:args.max_encoder_length]
 
@@ -264,7 +267,7 @@ def get_hotpot_features(data_file, tokenizer, mode):
                 decoder_attention_mask = [1] + encoded["attention_mask"]
 
                 if len(labels) > args.max_decoder_length:
-                    print("Long Output:", len(labels))
+                    #print("Long Output:", len(labels))
                     continue
 
                 while len(labels) < args.max_decoder_length:
@@ -377,7 +380,7 @@ def get_musique_features(data_file, tokenizer, mode):
                 attention_mask = encoded_input["attention_mask"]
 
                 if len(input_ids) > args.max_encoder_length:
-                    print(f"Long Input: {len(input_ids)}")
+                    #print(f"Long Input: {len(input_ids)}")
                     input_ids = input_ids[:args.max_encoder_length]
                     attention_mask = attention_mask[:args.max_encoder_length]
                     
@@ -397,7 +400,7 @@ def get_musique_features(data_file, tokenizer, mode):
 
                     if len(labels) > args.max_decoder_length:
                         passed_output_num +=1
-                        print(f"Long Output ({passed_output_num}): {len(labels)}")
+                        #print(f"Long Output ({passed_output_num}): {len(labels)}")
                         continue
 
                     while len(labels) < args.max_decoder_length:
@@ -561,7 +564,7 @@ def get_musique_features(data_file, tokenizer, mode):
             attention_mask = encoded["attention_mask"]
 
             if len(input_ids) > args.max_encoder_length:
-                print(f"Long Input: {len(input_ids)}")
+                #print(f"Long Input: {len(input_ids)}")
                 input_ids = input_ids[:args.max_encoder_length]
                 attention_mask = attention_mask[:args.max_encoder_length]
 
@@ -584,7 +587,7 @@ def get_musique_features(data_file, tokenizer, mode):
 
             if len(labels) > args.max_decoder_length:
                 passed_output_num +=1
-                print("Long Output:", len(labels))
+                #print("Long Output:", len(labels))
                 continue
 
             while len(labels) < args.max_decoder_length:
@@ -634,18 +637,21 @@ class GDataset(Dataset):
         self.features = []
         self.hops = sorted(list(self.features_per_hop.keys()))
         self.max_features_num = 0
-        for feats in self.features_per_hop.values():
-            self.features += feats
-            if self.max_features_num < len(feats):
-                self.max_features_num = len(feats)
+        for hop, feats in self.features_per_hop.items():
+            if mode == "train":
+                np.random.shuffle(feats)
+                self.features += feats[:int(len(feats)*supp_ratios[hop])]
+            else:
+                self.features += feats
         self.mix_batch = False
 
     def set_hop(self, hop):
         if hop not in self.features_per_hop:
             print("hop out-of-range:", self.hops)
             assert False
-        self.features = self.features_per_hop[hop]
-
+            
+        self.features = self.features_per_hop[hop]        
+   
     def do_mix_batch(self):
         self.mix_batch = True
 
@@ -656,16 +662,51 @@ class GDataset(Dataset):
         return self.features[idx]
     
     def collate_fn(self, batch):
-        for i, feature in enumerate(batch):
-            batch[i] = FeatInst(unique_id=np.asarray(feature.unique_id),
-                                input_ids=np.asarray(feature.input_ids),
-                                attention_mask=np.asarray(feature.attention_mask),
-                                decoder_input_ids=np.asarray(feature.decoder_input_ids),
-                                decoder_attention_mask=np.asarray(feature.decoder_attention_mask),
-                                labels=np.asarray(feature.labels),
-                                hop=np.asarray(feature.hop))
-        results = FeatInst(*(default_collate(samples) for samples in zip(*batch)))
-        return results
+        return FeatInst(
+            unique_id=torch.tensor([b.unique_id for b in batch]),
+            input_ids=torch.tensor([b.input_ids for b in batch]),
+            attention_mask=torch.tensor([b.attention_mask for b in batch]),
+            decoder_input_ids=torch.tensor([b.decoder_input_ids for b in batch]),
+            decoder_attention_mask=torch.tensor([b.decoder_attention_mask for b in batch]),
+            labels=torch.tensor([b.labels for b in batch]),
+            hop=torch.tensor([b.hop for b in batch]),
+        )
+
+class HopBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size):
+        self.batch_size = batch_size
+        self.hop_to_indices = {}
+
+        for idx, feat in enumerate(dataset.features):
+            self.hop_to_indices.setdefault(feat.hop, []).append(idx)
+
+        for hop in self.hop_to_indices:
+            random.shuffle(self.hop_to_indices[hop])
+
+        self.batches = []
+        for hop, indices in self.hop_to_indices.items():
+            for i in range(0, len(indices), batch_size):
+                batch = indices[i:i+batch_size]
+                if len(batch) == batch_size:
+                    self.batches.append(batch)
+
+        random.shuffle(self.batches)
+
+    def __iter__(self):
+        batches = []
+
+        for hop, indices in self.hop_to_indices.items():
+            random.shuffle(indices)
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i+self.batch_size]
+                if len(batch) == self.batch_size:
+                    batches.append(batch)
+
+        random.shuffle(batches)
+        yield from batches
+
+    def __len__(self):
+        return len(self.batches)
     
 class Model(nn.Module):
     def __init__(self, model_name, tokenizer):
@@ -830,25 +871,11 @@ class Model(nn.Module):
 
         return prediction_per_hop
     
-def train(model, train_dataset, valid_dataset, model_dir, device, start_epoch=0, optimizer_state=None, scheduler_state=None, opt_checkpoint=None, max_score=-1):
-    def get_loaders(loaders, hops, epoch):
-        if len(hops) == 1:
-            total_loader = tqdm.tqdm(zip(loaders[1]), total=len(loaders[1]), desc=f"Train Epoch-{epoch} | MIX BATCH {hops}")
-        elif len(hops) == 2:
-            total_loader = tqdm.tqdm(zip(loaders[1], loaders[2]), total=min([len(loaders[i]) for i in hops]), desc=f"Train Epoch-{epoch} | MIX BATCH {hops}")
-        elif len(hops) == 3:
-            total_loader = tqdm.tqdm(zip(loaders[1], loaders[2], loaders[3]), total=min([len(loaders[i]) for i in hops]), desc=f"Train Epoch-{epoch} | MIX BATCH {hops}")
-        elif len(hops) == 4:
-            total_loader = tqdm.tqdm(zip(loaders[1], loaders[2], loaders[3], loaders[4]), total=min([len(loaders[i]) for i in hops]), desc=f"Train Epoch-{epoch} | MIX BATCH {hops}")
-        return total_loader
-
-    progress_bar = tqdm.tqdm
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=train_dataset.collate_fn)
-        
+def train(model, train_dataset, valid_dataset, model_dir, device, main_complexity, optimizer_state=None, scheduler_state=None, opt_checkpoint=None, max_score=-1):
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     if optimizer_state:
         optimizer.load_state_dict(optimizer_state)
-    num_training_steps = args.epochs * len(train_loader)
+    num_training_steps = args.epochs * len(train_dataset) / args.batch_size
     scheduler = get_linear_schedule_with_warmup(optimizer, args.warmup_steps, num_training_steps)
     if scheduler_state:
         scheduler.load_state_dict(scheduler_state)
@@ -857,59 +884,35 @@ def train(model, train_dataset, valid_dataset, model_dir, device, start_epoch=0,
     num_hold = args.early_stop
     total_train_losses = []
     total_loader = None
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(args.epochs):
         epoch = epoch + 1
         train_loss = []
-        optimizer.zero_grad()
-        used_hops = None
-
-        model.train()
-        model.zero_grad()
         
-        loaders = dict()
-        total_batch = 0
-        for hop in train_dataset.hops:
-            if args.start_epochs[hop] > epoch:
-                break
-            new_dataset = copy.deepcopy(train_dataset)
-            new_dataset.do_mix_batch()
-            new_dataset.set_hop(hop)
-            train_loader = DataLoader(new_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=new_dataset.collate_fn)
-            total_batch += len(new_dataset)
-            del new_dataset
-            loaders[hop] = train_loader
-        used_hops = list(loaders.keys())
-
-        total_loader = get_loaders(loaders, used_hops, epoch)
-        for batch_list in total_loader:
-            local_losses = torch.tensor(0.0).to(device)
-            for batch in batch_list:
-                hop = batch.hop[0].item()
-                loss = model(hop, 
-                            batch.input_ids.to(device), 
-                            batch.attention_mask.to(device),
-                            batch.decoder_input_ids.to(device),
-                            batch.decoder_attention_mask.to(device),
-                            batch.labels.to(device))
-                loss.backward()
-                train_loss.append(float(loss))
-                local_losses += loss
-
-            total_train_losses.append(float(local_losses)/len(used_hops))
+        sampler = HopBatchSampler(train_dataset, batch_size=args.batch_size)
+        train_loader = DataLoader(train_dataset, batch_sampler=sampler, collate_fn=train_dataset.collate_fn)
+            
+        for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc=f"Train Epoch-{epoch}"):
+            hop = batch.hop[0].item()
+            loss = model(hop, 
+                        batch.input_ids.to(device), 
+                        batch.attention_mask.to(device),
+                        batch.decoder_input_ids.to(device),
+                        batch.decoder_attention_mask.to(device),
+                        batch.labels.to(device))*loss_weights[hop]
+            
+            loss.backward()
+            train_loss.append(float(loss))
 
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
-            model.zero_grad()
                 
-            total_loader.set_postfix(loss=float(local_losses)/len(used_hops))
         print("TRAIN LOSS:", round(sum(train_loss)/len(train_loss), 5))
-        del total_loader
 
         with torch.no_grad():
-            valid_score = predict(model, valid_dataset, device, desc=f"Valid Epoch-{epoch}", hops=used_hops)
+            valid_score = predict(model, valid_dataset, device, desc=f"Valid Epoch-{epoch}", hops=[main_complexity])
 
-        checkpoint = f"{epoch}_{valid_score}.pth"
+        checkpoint = f"{main_complexity}hop_{epoch}_{valid_score}.pth"
         print(f"Save the model to {os.path.join(model_dir, checkpoint)}")
         torch.save({'epoch': epoch,
                     'model_state_dict': model.state_dict(),
@@ -918,13 +921,12 @@ def train(model, train_dataset, valid_dataset, model_dir, device, start_epoch=0,
                     'opt_checkpoint': opt_checkpoint,
                     'max_score': max_score}, os.path.join(model_dir, checkpoint))
 
-        if len(hops) == len(used_hops):
-            if max_score < valid_score:
-                max_score = valid_score
-                opt_checkpoint = checkpoint
-                num_hold = args.early_stop
-            else:
-                num_hold -= 1
+        if max_score < valid_score:
+            max_score = valid_score
+            opt_checkpoint = checkpoint
+            num_hold = args.early_stop
+        else:
+            num_hold -= 1
 
         plt.plot(total_train_losses)
         plt.savefig(os.path.join(model_dir, f"train-loss.png"))
@@ -1023,11 +1025,6 @@ def predict(model, dataset, device, desc="Test", result_file=None, hops=None):
         total_performances[metric] /= len(performances_per_hop.keys())
 
     performances_per_hop["total"] = total_performances
-    
-    print("### Total Performances ###")
-    print("BLEU:", bleu)
-    print("METEOR:", meteor)
-    print("ROUGE-L:", rougel)
 
     if result_file:
         with open(result_file, "w") as fout:
@@ -1064,7 +1061,8 @@ def analyze(model, dataset, device, result_file=None, hops=None):
     with open(result_file, "w") as fout:
         json.dump(results, fout, indent=1)
     
-if __name__ == "__main__":
+def main():
+    global supp_ratios, loss_weights, nlp
     parse_argument()
     seed_everything(args.seed)
     device = torch.device("cuda")
@@ -1084,12 +1082,7 @@ if __name__ == "__main__":
             args.model_name = arg_dict["model_name"]
             args.max_encoder_length = arg_dict["max_encoder_length"]
             args.max_decoder_length = arg_dict["max_decoder_length"]
-            start_epochs = arg_dict["start_epochs"]
-            for k, v in start_epochs.items():
-                args.start_epochs[int(k)] = int(v)
-            end_epochs = arg_dict["end_epochs"]
-            for k, v in end_epochs.items():
-                args.end_epochs[int(k)] = int(v)
+            args.supp_ratio = arg_dict["supp_ratio"]
             args.no_self_attention = arg_dict["no_self_attention"]
             args.no_cross_attention = arg_dict["no_cross_attention"]
             args.no_arrangement = arg_dict["no_arrangement"]
@@ -1097,12 +1090,6 @@ if __name__ == "__main__":
         with open(config, "w") as fout:
             json.dump(vars(args), fout, indent=1)
     print(args)
-
-    if "t5" in args.model_name:
-        from models import T5ForConditionalGeneration as ConditionalGeneration
-
-    else:
-        from models import BartForConditionalGeneration as ConditionalGeneration
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     nlp = spacy.load("en_core_web_sm")
@@ -1113,23 +1100,39 @@ if __name__ == "__main__":
         print("Generate valid features...")
         valid_dataset = GDataset(args.valid_data_file, tokenizer, device, mode="valid")
 
-        print("Generate train features...")
-        train_dataset = GDataset(args.train_data_file, tokenizer, device, mode="train")
-
         model = Model(args.model_name, tokenizer).cpu()
-
-        if args.checkpoint:
-            print("Use checkpoint:", args.checkpoint)
-            checkpoint_dict = torch.load(args.checkpoint)
-            model.load_state_dict(checkpoint_dict["model_state_dict"])
+        model = model.to(device)
+        model.train()
+        
+        complexities = [1, 2, 3, 4]
+        if "hotpotqa" in args.train_data_file:
+            complexities = [1, 2]
+        
+        for main_complexity in complexities:
+            supp_ratios = dict([(hop, 1) for hop in complexities])
+            loss_weights = dict([(hop, 1) for hop in complexities])
+            for sub in complexities:
+                if sub > main_complexity:
+                    supp_ratios[sub] = args.supp_ratio
+            
+            for sub in complexities:
+                if sub < main_complexity:
+                    loss_weights[sub] = args.loss_weight_low
+                elif sub > main_complexity:
+                    loss_weights[sub] = args.loss_weight_high
+            
+            print(f"Main Complexity-{main_complexity} | Model Optimization...")
+            print("Suppression Ratio:", supp_ratios)
+            print("Loss Weight:", loss_weights)
+            
+            print("Generate train features...")
+            train_dataset = GDataset(args.train_data_file, tokenizer, device, mode="train")
+            
+            opt_checkpoint = train(model, train_dataset, valid_dataset, model_dir, device, main_complexity)    
+            print("Continue training from checkpoint:", opt_checkpoint)
+            opt_checkpoint_dict = torch.load(opt_checkpoint)
+            model.load_state_dict(opt_checkpoint_dict["model_state_dict"])
             model = model.to(device)
-
-            opt_checkpoint = train(model, train_dataset, valid_dataset, model_dir, device, start_epoch=checkpoint_dict["epoch"], 
-                  optimizer_state=checkpoint_dict["optimizer_state_dict"], scheduler_state=checkpoint_dict["scheduler_state_dict"], 
-                  opt_checkpoint=checkpoint_dict["opt_checkpoint"], max_score=checkpoint_dict["max_score"])
-        else:
-            model = model.to(device)
-            opt_checkpoint = train(model, train_dataset, valid_dataset, model_dir, device)
 
     if args.do_eval:
         print("Generate valid features...")
@@ -1187,3 +1190,6 @@ if __name__ == "__main__":
 
         result_file = checkpoint + "-analysis.json"
         analyze(model, test_dataset, device, result_file=result_file, hops=[2,3,4])
+        
+if __name__ == "__main__":
+    main()

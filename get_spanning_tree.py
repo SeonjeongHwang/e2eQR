@@ -5,6 +5,9 @@ import pytextrank
 import networkx as nx
 import numpy as np
 
+import nltk
+nltk.download('stopwords')
+
 from nltk.corpus import stopwords
 
 from collections import namedtuple, Counter
@@ -113,13 +116,18 @@ if __name__ == "__main__":
     nlp.add_pipe("textrank")
 
     fail = 0
-    with open(f"musique_ans_supp_{split}.json", "r") as fin:
-        data_list = json.load(fin)
+    data_list = []
+    with open(f"data/musique/musique_{split}.jsonl", "r") as fin:
+        for line in fin:
+            data_list.append(json.loads(line))
 
     new_data_list = []
     for data in tqdm.tqdm(data_list):
         _id = data["id"]
         add_this = False
+        
+        supp_paragraphs = [paragraph for paragraph in data["paragraphs"] if paragraph["is_supporting"]]
+        data["paragraphs"] = supp_paragraphs
 
         idx_to_fact = dict()
         facts = []
@@ -325,7 +333,6 @@ if __name__ == "__main__":
             #        print("-"*30)
             #print("#"*30)
 
-
             if len(data["paragraphs"]) != len(entity_per_connection.keys()):
                 continue
 
@@ -343,11 +350,5 @@ if __name__ == "__main__":
                 
     print("total:", len(new_data_list))
     print("fail:", fail)
-    with open(f"musique_ans_supp_{split}_bridge.json", "w") as fout:
+    with open(f"data/musique/musique_bridge_{split}.json", "w") as fout:
         json.dump(new_data_list, fout, indent=1)
-
-
-
-
-        
-
